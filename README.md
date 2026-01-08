@@ -1,8 +1,13 @@
-# mpv-gestures
+# mpv-gestures-lite-version
 Touchscreen and mouse gestures for mpv.
 
-Supports seeking via horizontal swiping with hysteresis and volume and speed control via vertical swiping (left half of the screen for speed, right for volume). You can also click-n-drag for fine control. Swiping with the middle mouse button allows for finer speed controls; horizontal swipes with the middle mouse button change the relative speed, vertical swipes resets it back to 1.00.
+Supports seeking via horizontal swiping and volume via vertical swiping and speed control via click-n-drag mid mouse button and move to left for slower and right for faster.
 
-You need to set `no-window-dragging` in you `mpv.conf` for this script to work.
+Move gestures.lua to mpv configuration folder `C:\users\USERNAME\AppData\Roaming\mpv.net\scripts` create scripts folder if it doesn't exist.
+Then you need to set `no-window-dragging` in your `mpv.conf` for this script to work.
 
-For configuration options see the source.
+set this for support seeking via horizontal touchpad gestures in your `input.conf`
+```
+Wheel_Right  no-osd seek  -1              # Seek Forward
+Wheel_Left  no-osd seek  1                # Seek Backward
+```
