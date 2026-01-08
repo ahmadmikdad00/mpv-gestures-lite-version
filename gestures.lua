@@ -1,307 +1,192 @@
 -- touchscreen and mouse gestures for mpv.
--- in order to use this, you have to set 
-
--- to configure create a configuration under script-opts, following keys are respected
 
 local OPTS = {
-    -- general
-    autostart = 0,
-    deadzone = 50,
-    sample_rate_ms = 48,
-    input_delay = mp.get_property_native("input-doubleclick-time"),
-    -- seeking / volume controller
+    autostart = 1,
+
+    deadzone = 30,
+    sample_rate_ms = 16,
+    input_delay = 0,
+
     seek_volume_button = "MOUSE_BTN0",
-    -- seeking
-    pixels_per_second = 10,
-    inertia_tick_ms = 16, -- lower values achieve smoother inertia at the cost of performance
-    inertia_lower_bound_pixels = 10,
-    -- volume
-    volume_modifier = 50,
-    -- speed
+
+    pixels_per_second = 6,
+    volume_modifier = 60,
+
     speed_enabled = 1,
     speed_button = "MBTN_MID",
-    pps = 1000,
+    pps = 1200,
 }
-(require 'mp.options').read_options(OPTS)
 
-local mp = require 'mp'
-local msg = require 'mp.msg'
-math.randomseed(mp.get_time()); math.random(); math.random(); math.random()
+(require "mp.options").read_options(OPTS)
 
-local function noop()
-end
+local mp = require "mp"
 
-local function if_enabled(enable) return function(wrappee) if enable then
-    local wrap = wrappee();
-    return { start = function() wrap.start() end, stop = function() wrap.stop() end }
-else
-    return { start = noop, stop = noop }
-end end end
-
+-- =========================
+-- DRAG HANDLER (FINAL)
+-- =========================
 local function drag_handler(onDrag, onStart, onEnd, options)
-    if onStart == nil then onStart = noop end
-    if onEnd == nil then onEnd = noop end
-    if options == nil then options = {} end
-    if options.deadzone == nil then options.deadzone = false end
-    if options.deadzone_reset == nil then options.deadzone_reset = "auto" end
-    if options.tick_ms == nil then options.tick_ms = 48 end
-    if options.button == nil then options.button = "MOUSE_BTN0" end
-    if options.input_delay == nil then options.input_delay = mp.get_property_native("input-doubleclick-time") end
+    options = options or {}
+    local deadzone = options.deadzone or 30
+    local button = options.button or "MOUSE_BTN0"
+    local tick = options.tick_ms or 16
 
-    local mouse = "up"
-    local state = 0 -- 0: off, 1: drag
-    local startx, starty = -1
-    local startw, starth = -1;
-    local x, y = -1
-    
-    local haste = false; -- whether there is a latency (for eg doubleclick) before acting on input, can be controlled externally via set_haste
-    local active_deadzone = false;
+    local state = "idle" -- idle | tracking | dragging
+    local sx, sy = 0, 0
+    local lastx, lasty = 0, 0
+    local click_time = 0
 
-    local ticker -- hoist timer
-    local drag_start_deferrer -- hoist timer
+    local ticker
+    ticker = mp.add_periodic_timer(tick / 1000, function()
+        if state == "tracking" or state == "dragging" then
+            local x, y = mp.get_mouse_pos()
+            local dx = x - sx
+            local dy = y - sy
 
-    local function reset()
-        drag_start_deferrer:kill();
-        ticker:kill();
-        if options.deadzone_reset ~= "manual" then active_deadzone = false end
-        state = 0
-        startx, starty = -1
-        x, y = -1
-    end
-
-    ticker = mp.add_periodic_timer(options.tick_ms / 1000, function()
-        if mouse == "down" and state == 1 then -- in drag
-            local w, h = mp.get_osd_size();
-            if (w ~= startw or h ~= starth) then -- window size invalidated (ex fullscreen), bail
-                reset()
-                msg.trace("bailed")
-                return
-            end
-
-            x, y = mp.get_mouse_pos()
-            msg.trace("dragging")
-            local diffx, diffy = x - startx, y - starty
-
-            if not options.deadzone then
-                onDrag(diffx, diffy)
-            else
-                if not active_deadzone then
-                    local abdiffx, abdiffy = math.abs(diffx), math.abs(diffy)
-                    if options.deadzone > abdiffx and options.deadzone > abdiffy then -- both inside deadzone, no active
-                        active_deadzone = false;
-                    else
-                        if abdiffy >= abdiffx then
-                            active_deadzone = "y"
-                        else
-                            active_deadzone = "x"
-                        end
-                    end
+            if state == "tracking" then
+                if math.abs(dx) > deadzone or math.abs(dy) > deadzone then
+                    state = "dragging"
+                    onStart()
+                else
+                    return
                 end
-                
-                if active_deadzone then -- a deadzone has been breached, act
-                    if active_deadzone == "y" then
-                        onDrag(false, diffy)
-                    elseif active_deadzone == "x" then
-                        onDrag(diffx, false)
-                    else
-                        msg.warn("unspecified active deadzone value")
-                    end
-                end                        
             end
+
+            onDrag(dx, dy)
+            lastx, lasty = x, y
         end
-    end); ticker:kill() -- don't run unless initiated
+    end)
+    ticker:kill()
 
-    local function drag_start()
-        onStart()
-        state = 1
-        ticker:resume()
-        msg.trace("start drag")
-    end
-    drag_start_deferrer = mp.add_timeout(options.input_delay / 1000, function()
-        drag_start()
-    end); drag_start_deferrer:kill();
+    local function binding(e)
+        if e.event == "down" then
+            sx, sy = mp.get_mouse_pos()
+            lastx, lasty = sx, sy
+            click_time = mp.get_time()
+            state = "tracking"
+            ticker:resume()
 
-    local bindingname = "a-" .. math.random(1, 1000000) .. "-b";
-    local binding = function(t)
-        mouse = t.event
-        
-        if mouse == "down" and state == 0 then -- start dragging
-            startx, starty = mp.get_mouse_pos()
-            startw, starth = mp.get_osd_size()
-            x, y = startx, starty
-            if haste then drag_start() else drag_start_deferrer:resume() end
-        elseif mouse == "up" then -- drag stopped
-            local ostate = state
-            reset()
-            if ostate == 1 then
-                msg.trace("end drag")
+        elseif e.event == "up" then
+            ticker:kill()
+            local was_drag = (state == "dragging")
+            state = "idle"
+
+            if was_drag then
                 onEnd()
+            else
+                if options.on_click and mp.get_time() - click_time < 0.3 then
+                    options.on_click()
+                end
             end
         end
     end
 
-    return { start = function()
-        mp.remove_key_binding(bindingname)
-        mp.add_forced_key_binding(options.button, bindingname, binding, {complex = true, repeatable = true})
-    end, stop = function()
-        mp.remove_key_binding(bindingname)
-        reset();
-    end, set_haste = function(h)
-        haste = h
-    end, reset_deadzone = function()
-        active_deadzone = false
-    end}
-end
+        local bind_name = "gesture-" .. button
 
-local function seek_n_volume()
-    local time
-    local inertia_start;
-    local x
-    local dx
-    local init_pos
-    local init_vol
-    local max_vol
-    local osd_height
-    local control_pos
-    local control_vol
-
-    local drag
-
-    local function speedup(x)
-        -- in dire need of refactoring, do not expose those as opts yet as it's too finnicky
-        local elapsed = (time - inertia_start)/10 + 1
-        local speedup = math.max(math.abs(x), 250) * (elapsed)
-        if x > 0 then return -speedup else return speedup end 
-    end
-
-    local function set_pos()
-        local setpos = init_pos + x/OPTS.pixels_per_second
-        if setpos < 0 then setpos = 0 end
-        mp.command("seek " .. setpos .. " absolute exact")
-    end
-
-    local function digestX(newx)
-        if not control_pos then return end
-        local delta = mp.get_time() - time;
-        time = delta + time;
-        dx = (newx - x) / delta
-        x = newx
-
-        set_pos()
-    end
-
-    local function digestY(y)
-        if not control_vol then return end
-        y = -y
-        local vol = OPTS.volume_modifier*(y / (osd_height / 2))
-
-        mp.command("set volume " .. math.min(max_vol, math.max(0, init_vol + vol)))
-    end
-
-    local function calculX()
-        if not control_pos then return end
-        local delta = mp.get_time() - time;
-        time = delta + time;
-        dx = dx + speedup(dx)*delta
-        x = x + dx*delta
-
-        set_pos()
-    end
-
-    local inertia; inertia = mp.add_periodic_timer(OPTS.inertia_tick_ms / 1000, function()
-        msg.trace("on inertia", dx, x)
-        calculX()
-        if math.abs(dx) < OPTS.inertia_lower_bound_pixels then
-            msg.trace("end inertia")
-            inertia:kill()
-            drag.set_haste(false)
-            drag.reset_deadzone()
+        return {
+            start = function()
+                mp.add_forced_key_binding(button, bind_name, binding, {complex = true})
+            end,
+            stop = function()
+                mp.remove_key_binding(bind_name)
+            ticker:kill()
+            state = "idle"
         end
-    end); inertia:kill();
-
-
-    drag = drag_handler(function(newx, y)
-        msg.trace("on drag")
-        inertia:kill()
-        if newx ~= false then
-            control_pos = true
-        else
-            control_pos = false
-        end
-        if y ~= false then
-            control_vol = true
-        else
-            control_vol = false
-        end
-
-        digestX(newx)
-        digestY(y)
-    end, function()
-        msg.trace("start drag")
-        drag.set_haste(true)
-        inertia:kill()
-
-        init_pos = mp.get_property_native("time-pos")
-        init_vol = mp.get_property_native("volume")
-        max_vol = mp.get_property_native("volume-max")
-        local _w; w, osd_height = mp.get_osd_size()
-        time = mp.get_time()
-        x = 0
-        dx = 0
-    end, function()
-        msg.trace("end drag / start inertia")
-        inertia_start = mp.get_time()
-        inertia:resume()
-    end, { deadzone = OPTS.deadzone, deadzone_reset = "manual",
-        button = OPTS.seek_volume_button, tick_ms = OPTS.sample_rate_ms, input_delay = OPTS.input_delay })
-
-    return {
-    start = function() drag.start() end,
-        stop = function() drag.stop() end
     }
 end
 
-local function speed()
+-- =========================
+-- SEEK + VOLUME
+-- =========================
+local function seek_n_volume()
+    local init_pos, init_vol, max_vol, osd_h
+    local mode = nil -- "seek" | "volume"
+
+    local drag = drag_handler(
+        function(dx, dy)
+            if not mode then
+                if math.abs(dx) > math.abs(dy) then
+                    mode = "seek"
+                else
+                    mode = "volume"
+                end
+            end
+
+            if mode == "seek" then
+                mp.commandv(
+                    "seek",
+                    init_pos + dx / OPTS.pixels_per_second,
+                    "absolute",
+                    "exact"
+                )
+            else
+                local vol = init_vol - (dy / osd_h) * OPTS.volume_modifier
+                vol = math.max(0, math.min(max_vol, vol))
+                mp.commandv("set", "volume", vol)
+                mp.osd_message(("Volume: %d%%"):format(vol), 0.3)
+            end
+        end,
+        function()
+            init_pos = mp.get_property_number("time-pos", 0)
+            init_vol = mp.get_property_number("volume", 50)
+            max_vol = mp.get_property_number("volume-max", 100)
+            local _, h = mp.get_osd_size()
+            osd_h = h
+            mode = nil
+        end,
+        function() end,
+        {
+            deadzone = OPTS.deadzone,
+            button = OPTS.seek_volume_button,
+            tick_ms = OPTS.sample_rate_ms,
+            on_click = function()
+                mp.command("cycle pause")
+            end
+        }
+    )
+
+    return drag
+end
+
+local function speed_control()
+    if OPTS.speed_enabled ~= 1 then
+        return { start = function() end, stop = function() end }
+    end
+
     local init_speed
 
-    local drag = drag_handler(function(x, y)
-        if y ~= false then
-            mp.command("set speed 1.0")
-            return
-        end
-        if x ~= false then
-            mp.command("set speed " .. math.max(0.01, init_speed + x/OPTS.pps))
-            return
-        end
-    end, function()
-        init_speed = mp.get_property_native("speed")
-    end, nil, { button = OPTS.speed_button, deadzone = OPTS.deadzone })
-
-    return {
-        start = function() drag.start() end,
-        stop = function() drag.stop() end
-    }
+    return drag_handler(
+        function(dx, dy)
+            local spd = math.max(0.01, init_speed + dx / OPTS.pps)
+            mp.commandv("set", "speed", spd)
+            mp.osd_message(("Speed: %.2fx"):format(spd), 0.3)
+        end,
+        function()
+            init_speed = mp.get_property_number("speed", 1.0)
+        end,
+        function() end,
+        {
+            deadzone = OPTS.deadzone,
+            button = OPTS.speed_button,
+            tick_ms = OPTS.sample_rate_ms,
+        }
+    )
 end
 
-local ctl1 = seek_n_volume();
-local ctl2 = if_enabled(OPTS.speed_enabled)(speed);
+-- =========================
+-- INIT
+-- =========================
+local ctl = seek_n_volume()
+local ctl_speed = speed_control()
 
-local state = OPTS.autostart;
-if state then
-    ctl1.start()
-    ctl2.start()
+
+if OPTS.autostart == 1 then
+    ctl.start()
+    ctl_speed.start()
 end
 
-function toggle_gestures()
-    if state == 1 then
-        state = 0
-        ctl1.stop()
-        ctl2.stop()
-    else
-        state = 1
-        ctl1.start()
-        ctl2.start()
-    end
-end
-
-mp.add_key_binding(nil, "toggle", toggle_gestures)
+mp.add_key_binding(nil, "toggle-gestures", function()
+    ctl.stop()
+    ctl_speed.stop()
+    ctl.start()
+    ctl_speed.start()
+end)
