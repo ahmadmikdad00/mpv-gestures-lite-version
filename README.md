@@ -11,3 +11,5 @@ set this config in your `input.conf` for support seeking via horizontal touchpad
 Wheel_Right  no-osd seek  -1              # Seek Forward
 Wheel_Left  no-osd seek  1                # Seek Backward
 ```
+
+Close and reopen mpv to get the effect.
